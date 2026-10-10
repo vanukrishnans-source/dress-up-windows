@@ -38,3 +38,7 @@ the clothing area with the chosen garment, and refuses photos where no clothing 
 
 ## License
 Personal, non-commercial use (CatVTON weights are CC BY-NC-SA 4.0). See THIRD_PARTY.md.
+
+## Known limits (1.0.0)
+- Tops on a person wearing a one-piece outfit with a hijab/scarf over the chest (e.g. a T-shirt onto a long dress) come out weak: the top is changed, but colour/print don't follow the garment reliably. Full dresses work well. Best results: swap like-for-like (top onto a top, dress onto a dress), front-facing photo.
+- Garment photos of a person wearing the item are cut out automatically (cloth segmentation); flat product photos work best.
