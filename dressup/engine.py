@@ -216,7 +216,8 @@ class Engine:
         a = mcrop.astype(np.float32) / 255
         f = max(3, int(0.004 * max(cw, ch))) | 1
         a = cv2.GaussianBlur(cv2.erode(a, np.ones((f, f), np.uint8)), (f * 2 + 1, f * 2 + 1), 0)
-        a = np.maximum(a, cv2.erode(mcrop, np.ones((f * 3, f * 3), np.uint8)).astype(np.float32) / 255)[..., None]
+        a = np.maximum(a, cv2.erode(mcrop, np.ones((f * 3, f * 3), np.uint8)).astype(np.float32) / 255)
+        a = (a * (mcrop > 0))[..., None]   # hard guarantee: zero outside the mask -> original pixels bit-exact
         out = pa.astype(np.float32).copy()
         H, W = out.shape[:2]
         ix0, iy0, ix1, iy1 = max(0, x0), max(0, y0), min(W, x0 + cw), min(H, y0 + ch)
