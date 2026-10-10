@@ -86,6 +86,9 @@ def garment_mask(lab, kind):
         wy = waist_y(lab)
         if kind == "Upper":   # top half only (also when the person wears a one-piece dress)
             lo = bot if wy is None else min(bot, wy)
+            if not np.isin(lab, [4]).any():   # wearing a one-piece: waist ~ 1/3 of the way from shoulders to feet
+                fr = np.where(np.isin(lab, [4, 5, 6, 7, 12, 13, 9, 10]).any(1))[0]
+                lo = max(lo, int(top + 0.33 * (fr.max() - top)))
             m[: max(0, top - h // 40)] = 0; m[lo + h // 60:] = 0
         else:
             hi = top if wy is None else max(top, wy)
@@ -129,6 +132,21 @@ def _fit_garment(g, size):
     W, H = size; g = g.convert("RGB"); r = min(W / g.width, H / g.height)
     g = g.resize((max(1, int(g.width * r)), max(1, int(g.height * r))), Image.LANCZOS)
     c = Image.new("RGB", size, (255, 255, 255)); c.paste(g, ((W - g.width) // 2, (H - g.height) // 2)); return c
+
+def cutout_garment(lab, g, kind):
+    """If the garment photo shows a person wearing it, keep only the clothing (cloth segmentation),
+    white background, tightly cropped. Product photos (no person parts) are returned unchanged."""
+    body = np.isin(lab, [2, 11, 14, 15, 12, 13]).mean()
+    cls = {"Upper": [4, 7], "Lower": [5, 6], "Full dress": [4, 5, 6, 7, 8]}[kind]
+    m = np.isin(lab, cls).astype(np.uint8)
+    if body < 0.01 or m.mean() < 0.02: return g
+    n, cc, st, _ = cv2.connectedComponentsWithStats(m)
+    if n > 1: m = (cc == 1 + int(np.argmax(st[1:, 4]))).astype(np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+    a = np.asarray(g.convert("RGB")).copy(); a[m == 0] = 255
+    ys, xs = np.where(m > 0); p = 4
+    a = a[max(0, ys.min() - p):ys.max() + p, max(0, xs.min() - p):xs.max() + p]
+    return Image.fromarray(a)
 
 class CatVTON:
     def __init__(self, mdir, device="cpu"):
@@ -208,7 +226,8 @@ class Engine:
         pc = Image.fromarray(_crop_pad(pa, x0, y0, cw, ch)).resize(size, Image.LANCZOS)
         mcrop = _crop_pad(mk, x0, y0, cw, ch)
         mc = Image.fromarray(mcrop).resize(size, Image.NEAREST)
-        gc = _fit_garment(garment, size)
+        gs = min(1.0, 1024 / max(garment.size)); gsm = garment.resize((int(garment.width * gs), int(garment.height * gs)), Image.BILINEAR) if gs < 1 else garment
+        gc = _fit_garment(cutout_garment(self.parser.labels(gsm), gsm, kind), size)
         self.load()
         gen = self.vton(pc, gc, mc, steps=q["steps"], progress=progress, cancel=cancel)
         # paste back: only inside a feathered mask; everything else stays bit-exact
@@ -226,5 +245,5 @@ class Engine:
         out[iy0:iy1, ix0:ix1] = reg * (1 - a[sl]) + up[sl] * a[sl]
         res = Image.fromarray(out.round().clip(0, 255).astype(np.uint8))
         self.safety.check(res, "result")
-        if debug is not None: debug.update(mask=Image.fromarray(mk), crop=(x0, y0, cw, ch), gen=gen, garment_in=gc, secs=time.time() - t0)
+        if debug is not None: debug.update(mcrop=mc, mask=Image.fromarray(mk), crop=(x0, y0, cw, ch), gen=gen, garment_in=gc, secs=time.time() - t0)
         return res
