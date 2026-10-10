@@ -1,0 +1,6 @@
+__pycache__/
+build/
+dist/
+*.part
+selftest-out/
+.models-cache/

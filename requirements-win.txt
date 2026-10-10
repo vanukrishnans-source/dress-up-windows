@@ -1,0 +1,11 @@
+# Windows x64 build (Python 3.12: torch-directml 0.2.5 supports torch 2.4.1 / cp312)
+torch==2.4.1
+torch-directml==0.2.5.dev240914
+diffusers==0.29.2
+safetensors==0.4.5
+numpy==1.26.4
+pillow==10.4.0
+opencv-python-headless==4.10.0.84
+onnxruntime==1.20.1
+PySide6-Essentials==6.8.0.2
+pyinstaller==6.11.1

@@ -1,0 +1,92 @@
+# Build Dress Up (Windows x64 portable zip), test the PACKAGED exe on windows-latest (real CatVTON try-on on CPU), publish a Release.
+name: build
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish: {description: "Create / update the GitHub Release", type: boolean, default: false}
+permissions:
+  contents: write
+env:
+  PYTHONUTF8: "1"
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip, cache-dependency-path: requirements-win.txt}
+      - name: Install deps
+        shell: pwsh
+        run: |
+          python -m pip install -U pip wheel
+          pip install -r requirements-win.txt
+          python -c "import torch, torch_directml, diffusers, onnxruntime, PySide6; print(torch.__version__, diffusers.__version__, onnxruntime.__version__)"
+      - name: Cache models
+        uses: actions/cache@v4
+        with: {path: .models-cache, key: "models-dressup-v1-${{ hashFiles('dressup/models.py') }}"}
+      - name: Download models (resume + SHA-256)
+        shell: pwsh
+        run: python -m dressup --download-models --models "$PWD\.models-cache"
+      - name: PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller DressUp.spec --noconfirm
+          "{0:N1} MB" -f ((Get-ChildItem dist/DressUp -Recurse | Measure-Object Length -Sum).Sum / 1MB)
+      - name: Selftest - packaged DressUp_cli.exe, real try-on (CPU, Fast), outside-mask pixels exact
+        shell: pwsh
+        run: |
+          & dist\DressUp\DressUp_cli.exe --selftest --models "$PWD\.models-cache" --device cpu --out-dir "$PWD\selftest-out\cli"
+          $code = $LASTEXITCODE; Get-Content selftest-out\cli\selftest_report.json
+          if ($code -ne 0) { throw "selftest failed $code" }
+      - name: DirectML probe (child process) + forced GPU failure keeps running on CPU
+        shell: pwsh
+        run: |
+          & dist\DressUp\DressUp_cli.exe --dml-probe; Write-Host "probe exit $LASTEXITCODE (no GPU on runner is fine)"
+          $env:DRESSUP_FORCE_DML_FAIL = "1"
+          & dist\DressUp\DressUp_cli.exe --tryon testdata\person.jpg testdata\tshirt.jpg --kind Upper --quality Fast --device auto `
+             --models "$PWD\.models-cache" --out selftest-out\fallback.png
+          if ($LASTEXITCODE -ne 0) { throw "fallback run failed" }
+      - name: GUI - packaged DressUp.exe, real try-on + save via worker process, no-scroll check, screenshot
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path screens-ci | Out-Null
+          $p = Start-Process -FilePath dist\DressUp\DressUp.exe -PassThru -Wait -ArgumentList @(
+            "--person", "`"$PWD\testdata\person.jpg`"", "--garment", "`"$PWD\testdata\tshirt.jpg`"", "--models", "`"$PWD\.models-cache`"",
+            "--device", "cpu", "--quality", "Fast", "--auto-tryon", "--auto-save", "`"$PWD\selftest-out\gui_saved.jpg`"",
+            "--shots-dir", "`"$PWD\screens-ci`"", "--size", "1280x720")
+          Get-Content screens-ci\gui_autorun_report.json
+          if ($p.ExitCode -ne 0) { throw "GUI autorun failed" }
+      - name: Make zip
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File packaging/make_zip.ps1
+      - name: Zip verify (extract + --version)
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist\DressUp-*-win64.zip | Select-Object -First 1
+          $tmp = Join-Path $env:TEMP "du-verify"; Expand-Archive $zip.FullName -DestinationPath $tmp -Force
+          & (Get-ChildItem $tmp -Recurse -Filter DressUp_cli.exe | Select-Object -First 1).FullName --version
+          if ($LASTEXITCODE -ne 0) { throw "extracted exe failed" }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: DressUp-tests
+          path: |
+            selftest-out/**
+            screens-ci/**
+            dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with: {name: DressUp-win64-zip, path: dist/DressUp-*-win64.zip, compression-level: 0}
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+        shell: pwsh
+        env: {GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
+        run: |
+          $zip = Get-ChildItem dist\DressUp-*-win64.zip | Select-Object -First 1
+          $ver = $zip.Name -replace '^DressUp-(.+)-win64\.zip$', '$1'; $tag = "v$ver"
+          $sha = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          $r = Get-Content selftest-out\cli\selftest_report.json -Raw
+          $notes = "Dress Up $ver - realistic virtual try-on for Windows x64 (ROG Ally X). Unzip, run DressUp.exe (SmartScreen: More info -> Run anyway). First run downloads ~1.9 GB of models.`n`n$($zip.Name) $($zip.Length) bytes`nSHA-256 $sha`n`nCI selftest (packaged exe, CPU): $r"
+          gh release view $tag 2>$null; if ($LASTEXITCODE -eq 0) { gh release upload $tag $zip.FullName dist\SHA256SUMS --clobber } else { gh release create $tag $zip.FullName dist\SHA256SUMS --title "Dress Up $ver" --notes $notes }
