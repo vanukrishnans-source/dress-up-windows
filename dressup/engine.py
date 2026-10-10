@@ -51,12 +51,32 @@ def waist_y(lab):
     if not len(body): return None
     return int(body.min() + 0.40 * (body.max() - body.min()))
 
+def hands_mask(lab):
+    """Hands = the far end of each arm segment (from the shoulder side), radius ~ face height. Kept bit-exact so the
+    pose of the hands is preserved and they anchor the arms."""
+    h, w = lab.shape; out = np.zeros((h, w), bool)
+    fy = np.where((lab == 11).any(1))[0]
+    r = (fy.max() - fy.min()) * 0.85 if len(fy) > 3 else 0.06 * h
+    cy, cx = [np.mean(v) for v in np.where(np.isin(lab, [4, 7]))] if np.isin(lab, [4, 7]).any() else (h / 2, w / 2)
+    for c in (14, 15):
+        n, cc, st, _ = cv2.connectedComponentsWithStats((lab == c).astype(np.uint8))
+        for i in range(1, n):
+            if st[i, 4] < 30: continue
+            ys, xs = np.where(cc == i)
+            d0 = (ys - cy) ** 2 + (xs - cx) ** 2
+            sy, sx = ys[d0.argmin()], xs[d0.argmin()]          # shoulder-side end
+            d1 = (ys - sy) ** 2 + (xs - sx) ** 2
+            ey, ex = ys[d1.argmax()], xs[d1.argmax()]          # hand end
+            sel = (ys - ey) ** 2 + (xs - ex) ** 2 <= r * r
+            out[ys[sel], xs[sel]] = True
+    return out
+
 def garment_mask(lab, kind):
     """Area the new garment may occupy: current clothes of that type (closed + dilated a little so the shape can change),
     face, hair, bare arms/hands, legs, shoes and bag are always protected (kept bit-exact)."""
     h, w = lab.shape
     upper, lower = {4}, {5, 6}
-    cls = {"Upper": upper | {7, 8}, "Lower": lower | {7, 8}, "Full dress": upper | lower | {7, 8}}[kind]
+    cls = {"Upper": upper | {7, 8, 14, 15}, "Lower": lower | {7, 8, 12, 13}, "Full dress": upper | lower | {7, 8, 14, 15, 12, 13}}[kind]
     m = np.isin(lab, list(cls)).astype(np.uint8)
     core = np.isin(lab, list({"Upper": upper | {7}, "Lower": lower | {7}, "Full dress": upper | lower | {7}}[kind]))
     if kind == "Upper" and core.sum() == 0: core = np.isin(lab, [7])
@@ -77,7 +97,7 @@ def garment_mask(lab, kind):
     # fill holes
     cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     m = cv2.drawContours(np.zeros_like(m), cnts, -1, 1, -1)
-    prot = np.isin(lab, [1, 2, 3, 9, 10, 11, 12, 13, 14, 15, 16, 17]).astype(np.uint8)  # head, scarf/hijab, bare arms/hands, legs, shoes, bag
+    prot = (np.isin(lab, [1, 2, 3, 9, 10, 11, 16, 17]) | hands_mask(lab)).astype(np.uint8)  # head, scarf/hijab, hands, shoes, bag
     prot = cv2.dilate(prot, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(3, h // 150) | 1,) * 2))
     m[prot > 0] = 0
     return m
@@ -90,12 +110,20 @@ def _crop_box(mask, W, H, aspect=0.75):
     cw, ch = x1 - x0, y1 - y0
     if cw / ch < aspect: cw = ch * aspect
     else: ch = cw / aspect
-    cw, ch = min(cw, W), min(ch, H)
-    if cw / ch > aspect: cw = ch * aspect
-    else: ch = cw / aspect
-    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    x0 = int(np.clip(cx - cw / 2, 0, W - cw)); y0 = int(np.clip(cy - ch / 2, 0, H - ch))
-    return x0, y0, int(cw), int(ch)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2   # box may extend past the photo; outside is padded and discarded
+    if cw <= W: cx = np.clip(cx, cw / 2, W - cw / 2)
+    if ch <= H: cy = np.clip(cy, ch / 2, H - ch / 2)
+    return int(round(cx - cw / 2)), int(round(cy - ch / 2)), int(round(cw)), int(round(ch))
+
+def _crop_pad(a, x0, y0, cw, ch):
+    """Crop numpy image a (H,W[,C]) to box, edge-replicating outside the photo."""
+    H, W = a.shape[:2]
+    px0, py0 = max(0, -x0), max(0, -y0); px1, py1 = max(0, x0 + cw - W), max(0, y0 + ch - H)
+    c = a[max(0, y0):min(H, y0 + ch), max(0, x0):min(W, x0 + cw)]
+    if px0 or py0 or px1 or py1:
+        pad = ((py0, py1), (px0, px1)) + (((0, 0),) if a.ndim == 3 else ())
+        c = np.pad(c, pad, mode="reflect" if a.ndim == 3 else "constant")
+    return c
 
 def _fit_garment(g, size):
     W, H = size; g = g.convert("RGB"); r = min(W / g.width, H / g.height)
@@ -176,20 +204,25 @@ class Engine:
         mk = cv2.resize(mk * 255, (W, H), interpolation=cv2.INTER_NEAREST)
         x0, y0, cw, ch = _crop_box(mk, W, H)
         q = QUALITY[quality]; size = q["size"]
-        pc = person.crop((x0, y0, x0 + cw, y0 + ch)).resize(size, Image.LANCZOS)
-        mc = Image.fromarray(mk[y0:y0 + ch, x0:x0 + cw]).resize(size, Image.NEAREST)
+        pa = np.asarray(person)
+        pc = Image.fromarray(_crop_pad(pa, x0, y0, cw, ch)).resize(size, Image.LANCZOS)
+        mcrop = _crop_pad(mk, x0, y0, cw, ch)
+        mc = Image.fromarray(mcrop).resize(size, Image.NEAREST)
         gc = _fit_garment(garment, size)
         self.load()
         gen = self.vton(pc, gc, mc, steps=q["steps"], progress=progress, cancel=cancel)
         # paste back: only inside a feathered mask; everything else stays bit-exact
         up = np.asarray(gen.resize((cw, ch), Image.LANCZOS), np.float32)
-        a = mk[y0:y0 + ch, x0:x0 + cw].astype(np.float32) / 255
-        f = max(3, int(0.006 * max(cw, ch))) | 1
+        a = mcrop.astype(np.float32) / 255
+        f = max(3, int(0.004 * max(cw, ch))) | 1
         a = cv2.GaussianBlur(cv2.erode(a, np.ones((f, f), np.uint8)), (f * 2 + 1, f * 2 + 1), 0)
-        a = np.maximum(a, cv2.erode(mk[y0:y0 + ch, x0:x0 + cw], np.ones((f * 3, f * 3), np.uint8)).astype(np.float32) / 255)[..., None]
-        out = np.asarray(person, np.float32).copy()
-        reg = out[y0:y0 + ch, x0:x0 + cw]
-        out[y0:y0 + ch, x0:x0 + cw] = reg * (1 - a) + up * a
+        a = np.maximum(a, cv2.erode(mcrop, np.ones((f * 3, f * 3), np.uint8)).astype(np.float32) / 255)[..., None]
+        out = pa.astype(np.float32).copy()
+        H, W = out.shape[:2]
+        ix0, iy0, ix1, iy1 = max(0, x0), max(0, y0), min(W, x0 + cw), min(H, y0 + ch)
+        sl = (slice(iy0 - y0, iy1 - y0), slice(ix0 - x0, ix1 - x0))
+        reg = out[iy0:iy1, ix0:ix1]
+        out[iy0:iy1, ix0:ix1] = reg * (1 - a[sl]) + up[sl] * a[sl]
         res = Image.fromarray(out.round().clip(0, 255).astype(np.uint8))
         self.safety.check(res, "result")
         if debug is not None: debug.update(mask=Image.fromarray(mk), crop=(x0, y0, cw, ch), gen=gen, garment_in=gc, secs=time.time() - t0)
