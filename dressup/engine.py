@@ -122,7 +122,7 @@ def _crop_pad(a, x0, y0, cw, ch):
     c = a[max(0, y0):min(H, y0 + ch), max(0, x0):min(W, x0 + cw)]
     if px0 or py0 or px1 or py1:
         pad = ((py0, py1), (px0, px1)) + (((0, 0),) if a.ndim == 3 else ())
-        c = np.pad(c, pad, mode="reflect" if a.ndim == 3 else "constant")
+        c = np.pad(c, pad, mode="edge" if a.ndim == 3 else "constant")
     return c
 
 def _fit_garment(g, size):

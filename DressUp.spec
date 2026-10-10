@@ -1,13 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller onedir build for Dress Up (Windows x64): windowed DressUp.exe + console DressUp_cli.exe (worker / selftest).
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 root = Path(SPECPATH)
 datas = [(str(root / "packaging" / "icon.ico"), "."), (str(root / "THIRD_PARTY.md"), "."), (str(root / "LICENSE"), "."),
          (str(root / "testdata"), "testdata")]
 binaries = []; hidden = ["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "cv2", "onnxruntime"]
 for pkg in ("onnxruntime", "torch_directml", "diffusers"):
     d, b, h = collect_all(pkg); datas += d; binaries += b; hidden += h
+for m in ("requests", "filelock", "huggingface_hub", "numpy", "safetensors", "regex", "Pillow", "importlib_metadata", "tqdm", "packaging", "torch", "diffusers", "pyyaml"):
+    try: datas += copy_metadata(m)
+    except Exception: pass
+hidden += ["requests"]
 hidden += collect_submodules("diffusers.models") + collect_submodules("diffusers.schedulers")
 a = Analysis([str(root / "dressup" / "__main__.py")], pathex=[str(root)], binaries=binaries, datas=datas, hiddenimports=hidden,
              hookspath=[], runtime_hooks=[], noarchive=False,
